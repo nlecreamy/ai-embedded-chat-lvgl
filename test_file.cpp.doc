@@ -1,0 +1,178 @@
+#include <stdio.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include "esp_log.h"
+#include "esp_flash.h" // Modern replacement for esp_spi_flash.h
+#include "esp_chip_info.h" // Required for esp_chip_info()
+#include "nvs_flash.h"
+#include "esp_partition.h"
+#include "esp_heap_caps.h"
+#include "esp_wifi.h"
+#include "esp_vfs_fat.h"
+#include "wear_levelling.h"
+
+static const char* TAG = "MAIN_TEST";
+
+// --- Test Functions ---
+
+void log_system_info() {
+    ESP_LOGI(TAG, "--- System Information ---");
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    ESP_LOGI(TAG, "Chip model: %s Rev %d", (chip_info.model == CHIP_ESP32S3) ? "ESP32-S3" : "Unknown", chip_info.revision);
+    ESP_LOGI(TAG, "CPU Cores: %d", chip_info.cores);
+
+    uint32_t flash_size;
+    // Use the new esp_flash API
+    if(esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        ESP_LOGI(TAG, "Flash size: %luMB", flash_size / (1024 * 1024));
+    } else {
+        ESP_LOGE(TAG, "Failed to get flash size!");
+    }
+
+    size_t psram_size = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Total PSRAM size: %u bytes (%.2f MB)", psram_size, (float)psram_size / (1024.0*1024.0));
+    ESP_LOGI(TAG, "Free PSRAM: %u bytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+void log_partition_info() {
+    ESP_LOGI(TAG, "--- Partition Table ---");
+    const esp_partition_t* partition;
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    while (it != NULL) {
+        partition = esp_partition_get(it);
+        ESP_LOGI(TAG, "Name: %-10s | Type: %-4d | Subtype: %-4d | Offset: 0x%08lx | Size: %6lukB",
+                 partition->label, partition->type, partition->subtype, partition->address, partition->size / 1024);
+        it = esp_partition_next(it);
+    }
+    esp_partition_iterator_release(it);
+}
+
+void test_psram_allocation() {
+    ESP_LOGI(TAG, "--- PSRAM Allocation Test ---");
+    size_t alloc_size = 4 * 1024 * 1024; // Try to allocate 4MB from PSRAM
+    void *psram_ptr = heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM);
+    if (psram_ptr) {
+        ESP_LOGI(TAG, "Successfully allocated %d bytes from PSRAM.", alloc_size);
+        heap_caps_free(psram_ptr);
+        ESP_LOGI(TAG, "Freed PSRAM block.");
+    } else {
+        ESP_LOGE(TAG, "Failed to allocate %d bytes from PSRAM!", alloc_size);
+    }
+}
+
+void test_nvs() {
+    ESP_LOGI(TAG, "--- NVS Test ---");
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+
+    nvs_handle_t my_handle;
+    ESP_ERROR_CHECK(nvs_open("storage", NVS_READWRITE, &my_handle));
+
+    int32_t restart_counter = 0;
+    err = nvs_get_i32(my_handle, "restart_counter", &restart_counter);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "NVS: Value not found, setting to 0.");
+    }
+    ESP_LOGI(TAG, "Restart counter = %ld", restart_counter);
+
+    restart_counter++;
+    ESP_ERROR_CHECK(nvs_set_i32(my_handle, "restart_counter", restart_counter));
+    ESP_ERROR_CHECK(nvs_commit(my_handle));
+    nvs_close(my_handle);
+}
+
+void test_fatfs() {
+    ESP_LOGI(TAG, "--- FAT Filesystem Test ---");
+    const char *base_path = "/storage";
+    wl_handle_t wl_handle = WL_INVALID_HANDLE;
+    esp_vfs_fat_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 5,
+        .allocation_unit_size = CONFIG_WL_SECTOR_SIZE
+    };
+
+    // Use the new, non-deprecated function
+    esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl(base_path, "storage", &mount_config, &wl_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount FATFS partition: %s", esp_err_to_name(err));
+        return;
+    }
+
+    FILE* f = fopen("/storage/hello.txt", "w");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for writing");
+    } else {
+        fprintf(f, "Hello from ESP32-S3!\n");
+        fclose(f);
+        ESP_LOGI(TAG, "File written successfully.");
+
+        char line[64];
+        f = fopen("/storage/hello.txt", "r");
+        fgets(line, sizeof(line), f);
+        fclose(f);
+        // Trim newline character for cleaner logging
+        line[strcspn(line, "\n")] = 0;
+        ESP_LOGI(TAG, "Read from file: '%s'", line);
+    }
+    
+    // Use the new, non-deprecated function
+    esp_vfs_fat_spiflash_unmount_rw_wl(base_path, wl_handle);
+}
+
+void start_wifi_scan() {
+    ESP_LOGI(TAG, "--- Wi-Fi Scan Test ---");
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "Starting WiFi scan...");
+    // Using an empty initializer {} is fine and will zero-initialize the struct
+    wifi_scan_config_t scan_config = {}; 
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+    if(ap_count == 0) {
+        ESP_LOGW(TAG, "No APs found.");
+        return;
+    }
+
+    wifi_ap_record_t *ap_list = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_list));
+    ESP_LOGI(TAG, "Found %d access points:", ap_count);
+    for(int i = 0; i < ap_count; i++) {
+        ESP_LOGI(TAG, "SSID: %s, RSSI: %d", ap_list[i].ssid, ap_list[i].rssi);
+    }
+    free(ap_list);
+
+    esp_wifi_stop();
+}
+
+
+// --- Main Application Entry Point ---
+extern "C" void app_main(void)
+{
+    // Wait a moment for the serial monitor to connect
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    log_system_info();
+    log_partition_info();
+    test_psram_allocation();
+    test_nvs();
+    test_fatfs();
+    start_wifi_scan();
+
+    ESP_LOGI(TAG, "All tests complete. Application finished.");
+}
