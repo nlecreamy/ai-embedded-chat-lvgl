@@ -12,14 +12,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include "driver/uart.h"
 #include "credentials.h"
 
 static const char *TAG = "GEMINI";
 
-static std::string thoughts = "";
-static std::string answer = "";
-static std::string response_buffer = "";
 static SemaphoreHandle_t wifi_connected = NULL;
+
+struct HttpData {
+    std::string thoughts;
+    std::string answer;
+    std::string response_buffer;
+};
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -34,8 +38,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     }
 }
 
-static void process_data_line(const std::string& line) {
-    if (line.find("data: ") != 0) {
+static void process_data_line(const std::string& line, HttpData* data) {
+    if (line.rfind("data: ", 0) != 0) {
         return;  // Skip non-data lines
     }
     std::string json_str = line.substr(6);  // Skip "data: "
@@ -43,6 +47,14 @@ static void process_data_line(const std::string& line) {
     size_t start = json_str.find_first_not_of(" \t");
     if (start != std::string::npos) {
         json_str = json_str.substr(start);
+    }
+    // Trim trailing whitespace if any
+    size_t end = json_str.find_last_not_of(" \t");
+    if (end != std::string::npos) {
+        json_str = json_str.substr(0, end + 1);
+    }
+    if (json_str == "[DONE]") {
+        return;
     }
     cJSON *json = cJSON_Parse(json_str.c_str());
     if (json == NULL) {
@@ -59,21 +71,23 @@ static void process_data_line(const std::string& line) {
                 if (parts && cJSON_IsArray(parts)) {
                     cJSON *part = cJSON_GetArrayItem(parts, 0);
                     if (part) {
-                        cJSON *thought = cJSON_GetObjectItem(part, "thought");
-                        if (thought && cJSON_IsString(thought)) {
-                            if (thoughts.empty()) {
-                                printf("Thoughts summary:\n");
-                            }
-                            printf("%s", thought->valuestring);
-                            thoughts += thought->valuestring;
-                        } else {
-                            cJSON *text = cJSON_GetObjectItem(part, "text");
-                            if (text && cJSON_IsString(text)) {
-                                if (answer.empty()) {
+                        cJSON *thought_flag = cJSON_GetObjectItem(part, "thought");
+                        cJSON *text = cJSON_GetObjectItem(part, "text");
+                        if (text && cJSON_IsString(text)) {
+                            if (thought_flag && cJSON_IsBool(thought_flag) && cJSON_IsTrue(thought_flag)) {
+                                if (data->thoughts.empty()) {
+                                    printf("Thoughts :\n");
+                                }
+                                printf("%s\n", text->valuestring);
+                                data->thoughts += text->valuestring;
+                                data->thoughts += "\n";
+                            } else {
+                                if (data->answer.empty()) {
                                     printf("Answer:\n");
                                 }
-                                printf("%s", text->valuestring);
-                                answer += text->valuestring;
+                                printf("%s\n", text->valuestring);
+                                data->answer += text->valuestring;
+                                data->answer += "\n";
                             }
                         }
                     }
@@ -85,39 +99,19 @@ static void process_data_line(const std::string& line) {
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
+    HttpData* data = (HttpData*)evt->user_data;
     switch (evt->event_id) {
-        case HTTP_EVENT_ERROR:
-            break;
-        case HTTP_EVENT_ON_CONNECTED:
-            break;
-        case HTTP_EVENT_HEADERS_SENT:
-            break;
-        case HTTP_EVENT_ON_HEADER:
-            break;
-        case HTTP_EVENT_ON_DATA: {
+        case HTTP_EVENT_ON_DATA:
             if (!esp_http_client_is_chunked_response(evt->client)) {
                 return ESP_OK;
             }
-            response_buffer.append(static_cast<const char*>(evt->data), evt->data_len);
-            const size_t buf_len = response_buffer.size();
-            size_t start = 0;
-            while (start < buf_len) {
-                size_t pos = response_buffer.find('\n', start);
-                if (pos == std::string::npos) {
-                    break;
-                }
-                std::string line(response_buffer.data() + start, pos - start);
-                process_data_line(line);
-                start = pos + 1;
+            data->response_buffer.append((char*)evt->data, evt->data_len);
+            size_t pos;
+            while ((pos = data->response_buffer.find('\n')) != std::string::npos) {
+                std::string line = data->response_buffer.substr(0, pos);
+                data->response_buffer.erase(0, pos + 1);
+                process_data_line(line, data);
             }
-            response_buffer.erase(0, start);
-            break;
-        }
-        case HTTP_EVENT_ON_FINISH:
-            break;
-        case HTTP_EVENT_DISCONNECTED:
-            break;
-        case HTTP_EVENT_REDIRECT:
             break;
         default:
             break;
@@ -125,34 +119,41 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-static void process_full_buffer() {
-    const size_t buf_len = response_buffer.size();
-    size_t start = 0;
-    while (start < buf_len) {
-        size_t pos = response_buffer.find('\n', start);
-        if (pos == std::string::npos) {
-            pos = buf_len;
-        }
-        std::string line(response_buffer.data() + start, pos - start);
-        process_data_line(line);
-        start = pos + 1;
+static void process_full_buffer(HttpData* data) {
+    size_t pos;
+    // Process any complete lines left in the buffer
+    while ((pos = data->response_buffer.find('\n')) != std::string::npos) {
+        std::string line = data->response_buffer.substr(0, pos);
+        data->response_buffer.erase(0, pos + 1);
+        process_data_line(line, data);
     }
-    response_buffer.clear();
-    ESP_LOGI(TAG, "Stream processing complete. Final thoughts: %zu chars, answer: %zu chars", thoughts.length(), answer.length());
+    // Handle any trailing incomplete line (e.g., last chunk without \n)
+    if (!data->response_buffer.empty()) {
+        std::string line = data->response_buffer;
+        data->response_buffer.clear();
+        process_data_line(line, data);
+    }
+    ESP_LOGI(TAG, "Stream processing complete. Final thoughts: %zu chars, answer: %zu chars", data->thoughts.length(), data->answer.length());
 }
 
-// Add this function before app_main
-static void http_task(void *pvParameters) {
-    // Wait for WiFi connection
-    ESP_LOGI(TAG, "Waiting for WiFi connection...");
-    if (xSemaphoreTake(wifi_connected, pdMS_TO_TICKS(30000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to connect to WiFi within 30 seconds");
-        vTaskDelete(NULL);
-        return;
+static void read_line(char* buffer, size_t max_len) {
+    int idx = 0;
+    while (idx < (int)max_len - 1) {
+        uint8_t c;
+        int ret = uart_read_bytes(UART_NUM_0, &c, 1, portMAX_DELAY);
+        if (ret == 1) {
+            if (c == '\n' || c == '\r') {
+                break;
+            }
+            buffer[idx++] = (char)c;
+        }
     }
-    ESP_LOGI(TAG, "WiFi connected, proceeding with HTTP request");
+    buffer[idx] = '\0';
+}
 
-    const char *prompt = R"(Say a very big comprehensive story!)";
+static void process_prompt(const char* prompt) {
+    HttpData data;
+    data.response_buffer.reserve(1024);
 
     cJSON *root = cJSON_CreateObject();
     cJSON *contents = cJSON_AddArrayToObject(root, "contents");
@@ -175,6 +176,7 @@ static void http_task(void *pvParameters) {
     config.url = url;
     config.method = HTTP_METHOD_POST;
     config.event_handler = http_event_handler;
+    config.user_data = &data;
     config.disable_auto_redirect = false;
     config.crt_bundle_attach = esp_crt_bundle_attach;
 
@@ -183,7 +185,7 @@ static void http_task(void *pvParameters) {
     esp_http_client_set_post_field(client, post_data, strlen(post_data));
 
     esp_err_t err = esp_http_client_perform(client);
-    process_full_buffer();
+    process_full_buffer(&data);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "HTTP POST Status = %d", esp_http_client_get_status_code(client));
     } else {
@@ -192,11 +194,6 @@ static void http_task(void *pvParameters) {
 
     esp_http_client_cleanup(client);
     free(post_data);
-
-    // Keep this task running
-    while (true) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
 }
 
 extern "C" void app_main(void) {
@@ -227,11 +224,34 @@ extern "C" void app_main(void) {
 
     wifi_connected = xSemaphoreCreateBinary();
 
-    // After WiFi start, create dedicated task instead of doing work in main
-    xTaskCreate(http_task, "http_task", 8192, NULL, 5, NULL);
+    // Wait for WiFi connection
+    ESP_LOGI(TAG, "Waiting for WiFi connection...");
+    if (xSemaphoreTake(wifi_connected, pdMS_TO_TICKS(60000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to connect to WiFi within 60 seconds");
+        return;
+    }
+    ESP_LOGI(TAG, "WiFi connected");
 
-    // Main task just idles
+    // Initialize UART for serial input
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 0, 0, NULL, 0));
+    ESP_LOGI(TAG, "UART initialized. Enter prompts (one per line):");
+
+    // Main loop: read prompts from serial and process
+    char prompt[256];
     while (true) {
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        read_line(prompt, sizeof(prompt));
+        if (strlen(prompt) > 0) {
+            ESP_LOGI(TAG, "Received prompt: %s", prompt);
+            process_prompt(prompt);
+            printf("\n");  // Add a newline after response for readability
+        }
     }
 }
