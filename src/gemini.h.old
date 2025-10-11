@@ -1,0 +1,27 @@
+#ifndef GEMINI_H
+#define GEMINI_H
+
+#include <string>
+#include "esp_err.h"
+#include "esp_http_client.h"
+#include "cJSON.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+extern const char *TAG;
+extern SemaphoreHandle_t wifi_connected;
+
+struct HttpData {
+    std::string thoughts;
+    std::string answer;
+    std::string response_buffer;
+    cJSON *grounding_metadata = nullptr;
+};
+
+void print_citations(cJSON* metadata);
+void process_data_line(const std::string& line, HttpData* data);
+esp_err_t http_event_handler(esp_http_client_event_t *evt);
+void process_full_buffer(HttpData* data);
+void http_task(void *pvParameters);
+
+#endif // GEMINI_H
