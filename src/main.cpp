@@ -32,7 +32,6 @@
 #define TAG "merged"
 
 LGFX lcd;
-static lv_obj_t *touch_indicator;
 wl_handle_t wl_handle = WL_INVALID_HANDLE;
 SemaphoreHandle_t wifi_connected = NULL;
 
@@ -63,11 +62,8 @@ static void touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
         data->point.x = x;
         data->point.y = y;
         data->state = LV_INDEV_STATE_PRESSED;
-        lv_obj_clear_flag(touch_indicator, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_pos(touch_indicator, x - 7, y - 7);
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
-        lv_obj_add_flag(touch_indicator, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -155,136 +151,205 @@ static void perform_calibration(uint16_t caldata[8]) {
     lcd.calibrateTouch(caldata, lcd.color565(255, 0, 0), lcd.color565(0, 0, 0), 20);
 }
 
-static void ta_event_cb(lv_event_t * e);
+#include <string.h>  // Assuming this is needed for strcmp; add if not present
 
-void lvgl_task(void *pvParameters) {
-    static int32_t col_dsc[] = {LV_GRID_FR(3), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    static int32_t row_dsc[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(4), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    
-    lv_obj_t * cont = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(cont, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_layout(cont, LV_LAYOUT_GRID);
-    lv_obj_set_grid_dsc_array(cont, col_dsc, row_dsc);
-    lv_obj_set_flag(cont, LV_OBJ_FLAG_SCROLLABLE, false);
-    
-    // Status bar at top center
-    lv_obj_t * status_label = lv_label_create(cont);
-    lv_label_set_text(status_label, "Status: Connected");
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(status_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_grid_cell(status_label, LV_GRID_ALIGN_CENTER, 0, 2, LV_GRID_ALIGN_CENTER, 0, 1);
-    
-    lv_obj_t *dropdown = lv_dropdown_create(cont);
-    lv_dropdown_set_options(dropdown, "gemini-2.5-pro\n"
-                                   "gemini-flash-latest\n"
-                                   "gemini-flash-lite-latest\n"
-                                   "gemini-2.5-flash\n"
-                                   "gemini-2.5-flash-lite");
-    lv_obj_set_grid_cell(dropdown, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_CENTER, 1, 1);  // Adjusted to row 1
-    
-    // Add a menu button in the narrow right column
-    lv_obj_t * conf_btn = lv_btn_create(cont);
-    lv_obj_t * conf_label = lv_label_create(conf_btn);
-    lv_label_set_text(conf_label, LV_SYMBOL_SETTINGS);
-    lv_obj_set_grid_cell(conf_btn, LV_GRID_ALIGN_CENTER, 1, 1, LV_GRID_ALIGN_CENTER, 1, 1);  // Moved to row 1
-    
-    lv_obj_t *label = lv_label_create(cont);
-    lv_label_set_text(label, "This is LVGL v9.3.0!");
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
-    lv_obj_set_grid_cell(label, LV_GRID_ALIGN_CENTER, 0, 2, LV_GRID_ALIGN_CENTER, 2, 1);  // Adjusted to row 2
-    
-    lv_obj_t *ta = lv_textarea_create(cont);
-    lv_textarea_set_one_line(ta, true);
-    lv_textarea_set_placeholder_text(ta, "Ask anything...");
-    lv_obj_set_grid_cell(ta, LV_GRID_ALIGN_CENTER, 0, 2, LV_GRID_ALIGN_CENTER, 3, 1);  // Adjusted to row 3
-    
-    lv_obj_t *kb = lv_keyboard_create(cont);
-    lv_obj_set_grid_cell(kb, LV_GRID_ALIGN_CENTER, 0, 2, LV_GRID_ALIGN_END, 2, 1);  // Adjusted to row 2
-    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-    
-    // Link textarea and keyboard
-    lv_keyboard_set_textarea(kb, ta);
+lv_obj_t * home_list;
+lv_obj_t * home_cont;
+lv_obj_t * touch_ind;
+lv_obj_t * status_bar;
+lv_obj_t * settings_cont;
 
-    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_FOCUSED, kb);
-    lv_obj_add_event_cb(ta, ta_event_cb, LV_EVENT_DEFOCUSED, kb);
-    
-    // Create the drawer (side panel)
-    static lv_obj_t * drawer = NULL;
-    drawer = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(drawer, LV_PCT(40), LV_PCT(100));
-    lv_obj_set_pos(drawer, LV_PCT(100), 0);  // Initially off-screen to the right
-    lv_obj_set_style_bg_color(drawer, lv_color_hex(0x333333), 0);  // Dark background
-    lv_obj_add_flag(drawer, LV_OBJ_FLAG_HIDDEN);  // Start hidden
-    lv_obj_add_flag(drawer, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(drawer, LV_DIR_VER);
-    
-    // Set flex layout for drawer
-    lv_obj_set_layout(drawer, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(drawer, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(drawer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_START);
-    
-    // Close button in drawer (top)
-    lv_obj_t * close_btn = lv_btn_create(drawer);
-    lv_obj_t * close_label = lv_label_create(close_btn);
-    lv_label_set_text(close_label,  LV_SYMBOL_CLOSE);
-    lv_obj_set_size(close_btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    
-    lv_obj_t * cb = lv_checkbox_create(drawer);
-    lv_obj_set_width(cb, LV_PCT(100));
-    lv_checkbox_set_text(cb, "Search");
+void cr_status_bar();
+void cr_home_scr();
+void cr_settings_scr();
 
-    // Event callback to open drawer using lambda
-    lv_obj_add_event_cb(conf_btn, [](lv_event_t * e) {
-        lv_obj_t * dr = (lv_obj_t *)lv_event_get_user_data(e);
-        lv_obj_clear_flag(dr, LV_OBJ_FLAG_HIDDEN);
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, dr);
-        lv_anim_set_values(&a, lv_obj_get_x(dr), LV_HOR_RES - lv_obj_get_width(dr));  // Slide from right
-        lv_anim_set_time(&a, 250);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
-        lv_anim_start(&a);
-    }, LV_EVENT_CLICKED, drawer);
-    
-    // Event callback to close drawer using lambda
-    lv_obj_add_event_cb(close_btn, [](lv_event_t * e) {
-        lv_obj_t * dr = (lv_obj_t *)lv_event_get_user_data(e);
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, dr);
-        lv_anim_set_values(&a, lv_obj_get_x(dr), LV_HOR_RES);  // Slide back to right
-        lv_anim_set_time(&a, 250);
-        lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
-        lv_anim_set_ready_cb(&a, [](lv_anim_t * anim) {
-            lv_obj_t * d = (lv_obj_t *)anim->var;
-            lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
-        });
-        lv_anim_start(&a);
-    }, LV_EVENT_CLICKED, drawer);
-    
-    touch_indicator = lv_label_create(lv_scr_act());
-    lv_label_set_text(touch_indicator, "x");
-    lv_obj_set_style_text_font(touch_indicator, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(touch_indicator, lv_color_hex(0xFF0000), 0);
-    lv_obj_add_flag(touch_indicator, LV_OBJ_FLAG_HIDDEN);
-    
-    while (1) {
-        lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(10));
+static void fade_out_home_cb(lv_anim_t * a);
+static void fade_out_settings_cb(lv_anim_t * a);
+
+static void event_handler(lv_event_t * e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t * obj = lv_event_get_target_obj(e);
+    if (code == LV_EVENT_CLICKED) {
+        const char * btn_text = lv_list_get_button_text(home_list, obj);
+        LV_LOG_USER("Clicked: %s", btn_text);
+        if (strcmp(btn_text, "Settings") == 0) {
+            lv_obj_set_style_opa(home_cont, LV_OPA_COVER, 0);
+            lv_anim_t a_out;
+            lv_anim_init(&a_out);
+            lv_anim_set_var(&a_out, home_cont);
+            lv_anim_set_values(&a_out, LV_OPA_COVER, LV_OPA_TRANSP);
+            lv_anim_set_time(&a_out, 300);
+            lv_anim_set_exec_cb(&a_out, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+            lv_anim_set_ready_cb(&a_out, fade_out_home_cb);
+            lv_anim_start(&a_out);
+        }
+        // Add similar if statements for other buttons if needed (e.g., for "Gemini AI", "Weather", "About")
     }
 }
 
-static void ta_event_cb(lv_event_t * e) {
+static void back_handler(lv_event_t * e)
+{
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t * obj = lv_event_get_target_obj(e);
-    lv_obj_t * kb = (lv_obj_t *)lv_event_get_user_data(e);
+    if (code == LV_EVENT_CLICKED) {
+        lv_obj_set_style_opa(settings_cont, LV_OPA_COVER, 0);
+        lv_anim_t a_out;
+        lv_anim_init(&a_out);
+        lv_anim_set_var(&a_out, settings_cont);
+        lv_anim_set_values(&a_out, LV_OPA_COVER, LV_OPA_TRANSP);
+        lv_anim_set_time(&a_out, 300);
+        lv_anim_set_exec_cb(&a_out, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+        lv_anim_set_ready_cb(&a_out, fade_out_settings_cb);
+        lv_anim_start(&a_out);
+    }
+}
 
-    if (code == LV_EVENT_FOCUSED) {
-        lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
-        lv_keyboard_set_textarea(kb, obj);
-    } else if (code == LV_EVENT_DEFOCUSED) {
-        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
-        lv_keyboard_set_textarea(kb, NULL);
+static void fade_out_home_cb(lv_anim_t * a)
+{
+    lv_obj_t * cont = (lv_obj_t *)a->var;
+    lv_obj_del(cont);
+    cr_settings_scr();
+    lv_obj_set_style_opa(settings_cont, LV_OPA_TRANSP, 0);
+    lv_anim_t a_in;
+    lv_anim_init(&a_in);
+    lv_anim_set_var(&a_in, settings_cont);
+    lv_anim_set_values(&a_in, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_time(&a_in, 300);
+    lv_anim_set_exec_cb(&a_in, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+    lv_anim_start(&a_in);
+}
+
+static void fade_out_settings_cb(lv_anim_t * a)
+{
+    lv_obj_t * cont = (lv_obj_t *)a->var;
+    lv_obj_del(cont);
+    cr_home_scr();
+    lv_obj_set_style_opa(home_cont, LV_OPA_TRANSP, 0);
+    lv_anim_t a_in;
+    lv_anim_init(&a_in);
+    lv_anim_set_var(&a_in, home_cont);
+    lv_anim_set_values(&a_in, LV_OPA_TRANSP, LV_OPA_COVER);
+    lv_anim_set_time(&a_in, 300);
+    lv_anim_set_exec_cb(&a_in, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
+    lv_anim_start(&a_in);
+}
+
+void setup_home_scr(){
+    cr_status_bar();
+    cr_home_scr();
+}
+
+void cr_status_bar() {
+    status_bar = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(status_bar, LV_PCT(100), LV_PCT(15));
+    lv_obj_align(status_bar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_pad_all(status_bar, 2, 0);
+    lv_obj_clear_flag(status_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t * status_label = lv_label_create(status_bar);
+    lv_label_set_text(status_label, "Status: Ready");
+    lv_obj_align(status_label, LV_ALIGN_LEFT_MID, 0, 0);
+}
+
+void cr_home_scr(){
+    home_cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(home_cont, LV_PCT(100), LV_PCT(85));
+    lv_obj_clear_flag(home_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(home_cont, 0, 0);
+    lv_obj_align_to(home_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+
+    home_list = lv_list_create(home_cont);
+    lv_obj_set_size(home_list, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(home_list, LV_ALIGN_TOP_MID, 0, 0);
+
+    // Add buttons to the list
+    lv_obj_t * btn;
+    btn = lv_list_add_button(home_list, LV_SYMBOL_SETTINGS, "Settings");
+    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
+    btn = lv_list_add_button(home_list, LV_SYMBOL_CHARGE, "Gemini AI");
+    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
+    btn = lv_list_add_button(home_list, LV_SYMBOL_GPS, "Weather");
+    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
+    btn = lv_list_add_button(home_list, LV_SYMBOL_TINT, "About");
+    lv_obj_add_event_cb(btn, event_handler, LV_EVENT_CLICKED, NULL);
+}
+
+void cr_settings_scr() {
+    settings_cont = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(settings_cont, LV_PCT(100), LV_PCT(85));
+    lv_obj_clear_flag(settings_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(settings_cont, 0, 0);
+    lv_obj_align_to(settings_cont, status_bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+
+    // Example settings content: a label and a back button
+    // You can expand this with a list, sliders, toggles, etc., as needed
+
+    lv_obj_t * settings_label = lv_label_create(settings_cont);
+    lv_label_set_text(settings_label, "Settings Screen");
+    lv_obj_align(settings_label, LV_ALIGN_CENTER, 0, -20);
+
+    lv_obj_t * back_btn = lv_btn_create(settings_cont);
+    lv_obj_set_size(back_btn, LV_PCT(20), LV_PCT(8));
+    lv_obj_align(back_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+
+    lv_obj_t * back_label = lv_label_create(back_btn);
+    lv_label_set_text(back_label, "Back");
+    lv_obj_center(back_label);
+
+    lv_obj_add_event_cb(back_btn, back_handler, LV_EVENT_CLICKED, NULL);
+
+    // Optional: Add more settings buttons here, e.g.,
+    // lv_obj_t * wifi_btn = lv_btn_create(settings_cont);
+    // ... and add event handlers if needed
+}
+
+void lvgl_task(void *pvParameters) {
+    // Create small canvas as touch indicator for custom cursor using points/lines
+    touch_ind = lv_canvas_create(lv_scr_act());
+    lv_obj_set_size(touch_ind, 20, 20);  // Precise 20x20 size
+
+    // Define buffer for ARGB8888 (true color alpha)
+    LV_DRAW_BUF_DEFINE_STATIC(draw_buf, 20, 20, LV_COLOR_FORMAT_ARGB8888);
+    LV_DRAW_BUF_INIT_STATIC(draw_buf);
+    lv_canvas_set_draw_buf(touch_ind, &draw_buf);
+
+    // Set transparent background
+    lv_obj_set_style_bg_opa(touch_ind, LV_OPA_TRANSP, 0);
+
+    // Initialize layer for drawing
+    lv_layer_t layer;
+    lv_canvas_init_layer(touch_ind, &layer);
+
+    // Draw horizontal line for crosshair cursor
+    lv_draw_line_dsc_t line_dsc;
+    lv_draw_line_dsc_init(&line_dsc);
+    line_dsc.color = lv_color_hex(0xFF0000);
+    line_dsc.width = 1;
+    line_dsc.round_start = 0;
+    line_dsc.round_end = 0;
+    line_dsc.p1.x = 0;
+    line_dsc.p1.y = 10;
+    line_dsc.p2.x = 19;
+    line_dsc.p2.y = 10;
+    lv_draw_line(&layer, &line_dsc);
+
+    // Draw vertical line for crosshair cursor
+    line_dsc.p1.x = 10;
+    line_dsc.p1.y = 0;
+    line_dsc.p2.x = 10;
+    line_dsc.p2.y = 19;
+    lv_draw_line(&layer, &line_dsc);
+
+    // Finish layer to apply drawings
+    lv_canvas_finish_layer(touch_ind, &layer);
+
+    lv_indev_set_cursor(lv_indev_get_next(NULL), touch_ind);
+
+    setup_home_scr();
+
+    while (1) {
+        lv_timer_handler();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -354,7 +419,7 @@ static void init_display(void) {
 
     lv_display_t *disp = lv_display_create(width, height);
     lv_display_set_flush_cb(disp, my_disp_flush);
-    lv_display_set_buffers(disp, disp_buf1, disp_buf2, buf_size_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(disp, disp_buf1, disp_buf2, buf_size_bytes * 2, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
